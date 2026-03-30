@@ -204,6 +204,10 @@ func (b *stubTelegramBot) FileDownloadLink(f *models.File) string {
 	return "https://test.example.com/file/" + f.FilePath
 }
 
+func (b *stubTelegramBot) EditForumTopic(_ context.Context, _ *tgbot.EditForumTopicParams) (bool, error) {
+	return true, nil
+}
+
 func (b *stubTelegramBot) SendMessageCallCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()

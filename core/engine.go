@@ -3565,6 +3565,16 @@ func (e *Engine) cmdBoq(p Platform, msg *Message, args []string) {
 			return
 		}
 		oldName := b.BoqName
+		originalTopicName := b.OriginalTopicName
+
+		// If we don't have a saved name, try to extract from the current message.
+		// The /boq exit message itself carries the topic name via ReplyToMessage.
+		if originalTopicName == "" {
+			if renamer, ok := p.(TopicRenamer); ok {
+				originalTopicName = renamer.TopicName(e.ctx, msg.ReplyCtx)
+			}
+		}
+
 		e.boqBindings.Unbind(projectKey, channelKey)
 
 		// Tear down current agent session
@@ -3572,8 +3582,14 @@ func (e *Engine) cmdBoq(p Platform, msg *Message, args []string) {
 
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqUnbound, oldName))
 
-		// Try to remove 📦 prefix from topic/chat name
-		e.boqRenameTopic(p, msg.ReplyCtx, channelKey, false)
+		// Restore original topic name
+		if originalTopicName != "" {
+			if renamer, ok := p.(TopicRenamer); ok {
+				if err := renamer.RenameTopic(e.ctx, msg.ReplyCtx, originalTopicName); err != nil {
+					slog.Warn("boq: restore topic name failed", "err", err)
+				}
+			}
+		}
 
 	default:
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBoqUsage))
@@ -3590,10 +3606,17 @@ func (e *Engine) boqBind(p Platform, msg *Message, channelKey, projectKey, boqNa
 		return
 	}
 
+	// Save original topic name for restore on exit
+	var originalTopicName string
+	if renamer, ok := p.(TopicRenamer); ok {
+		originalTopicName = renamer.TopicName(e.ctx, msg.ReplyCtx)
+	}
+
 	binding := &BoqBinding{
-		BoqName: boqName,
-		Runtime: runtime,
-		BoundAt: time.Now(),
+		BoqName:           boqName,
+		OriginalTopicName: originalTopicName,
+		Runtime:           runtime,
+		BoundAt:           time.Now(),
 	}
 
 	channelName := msg.ChatName
@@ -3605,50 +3628,21 @@ func (e *Engine) boqBind(p Platform, msg *Message, channelKey, projectKey, boqNa
 	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqBound, boqName, runtime))
 
 	// Try to add 📦 prefix to topic/chat name
-	e.boqRenameTopic(p, msg.ReplyCtx, channelKey, true)
+	e.boqRenameTopic(p, msg.ReplyCtx, channelKey)
 }
 
-// boqRenameTopic adds or removes the 📦 emoji prefix from the topic/chat name.
-func (e *Engine) boqRenameTopic(p Platform, replyCtx any, channelKey string, bind bool) {
+// boqRenameTopic adds the 📦 emoji prefix to the topic name on bind.
+func (e *Engine) boqRenameTopic(p Platform, replyCtx any, channelKey string) {
 	renamer, ok := p.(TopicRenamer)
 	if !ok {
 		return
 	}
-
-	// Attempt to get current topic name from workspace bindings or boq bindings
-	currentName := ""
-	if e.workspaceBindings != nil {
-		if wb := e.workspaceBindings.Lookup("project:"+e.name, channelKey); wb != nil {
-			currentName = wb.ChannelName
-		}
-	}
-	if currentName == "" {
-		if e.boqBindings != nil {
-			if bb := e.boqBindings.Lookup("project:"+e.name, channelKey); bb != nil {
-				currentName = bb.ChannelName
-			}
-		}
-	}
-	if currentName == "" {
+	bb := e.boqBindings.Lookup("project:"+e.name, channelKey)
+	if bb == nil || bb.OriginalTopicName == "" {
 		return
 	}
-
-	stripped := strings.TrimPrefix(currentName, boqEmoji+" ")
-	stripped = strings.TrimPrefix(stripped, boqEmoji)
-
-	var newName string
-	if bind {
-		newName = boqEmoji + " " + stripped
-	} else {
-		newName = stripped
-	}
-
-	if newName == currentName {
-		return
-	}
-
-	if err := renamer.RenameTopic(e.ctx, replyCtx, newName); err != nil {
-		slog.Debug("boq: rename topic failed", "err", err)
+	if err := renamer.RenameTopic(e.ctx, replyCtx, boqEmoji+" "+bb.OriginalTopicName); err != nil {
+		slog.Warn("boq: rename topic failed", "err", err)
 	}
 }
 

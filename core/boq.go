@@ -14,10 +14,11 @@ import (
 
 // BoqBinding maps a channel to a boq container instance.
 type BoqBinding struct {
-	BoqName     string    `json:"boq_name"`
-	ChannelName string    `json:"channel_name,omitempty"`
-	Runtime     string    `json:"runtime"` // "docker" or "podman"
-	BoundAt     time.Time `json:"bound_at"`
+	BoqName           string    `json:"boq_name"`
+	ChannelName       string    `json:"channel_name,omitempty"`
+	OriginalTopicName string    `json:"original_topic_name,omitempty"` // saved on bind, restored on exit
+	Runtime           string    `json:"runtime"`                      // "docker" or "podman"
+	BoundAt           time.Time `json:"bound_at"`
 }
 
 // BoqBindingManager persists channel->boq mappings.
@@ -234,6 +235,7 @@ func ContainerDirExists(ctx context.Context, runtime, containerName, dir string)
 // TopicRenamer is an optional Platform interface for renaming topic/chat titles.
 type TopicRenamer interface {
 	RenameTopic(ctx context.Context, replyCtx any, name string) error
+	TopicName(ctx context.Context, replyCtx any) string
 }
 
 // ContainerExecSetter is an optional Agent interface for injecting a container
