@@ -42,7 +42,7 @@ type claudeSession struct {
 	alive           atomic.Bool
 }
 
-func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool) (*claudeSession, error) {
+func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode string, allowedTools, disallowedTools []string, extraEnv []string, platformPrompt string, disableVerbose bool, containerExec []string) (*claudeSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := []string{
@@ -87,10 +87,20 @@ func newClaudeSession(ctx context.Context, workDir, model, sessionID, mode strin
 		args = append(args, "--append-system-prompt", sysPrompt)
 	}
 
-	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode)
+	slog.Debug("claudeSession: starting", "args", core.RedactArgs(args), "dir", workDir, "mode", mode, "containerExec", containerExec)
 
-	cmd := exec.CommandContext(sessionCtx, "claude", args...)
-	cmd.Dir = workDir
+	var cmd *exec.Cmd
+	if len(containerExec) > 0 {
+		// Run claude inside a container (e.g. boq).
+		// containerExec already includes runtime, exec, -i, -w, workDir, containerName.
+		fullArgs := append(containerExec[1:], "claude")
+		fullArgs = append(fullArgs, args...)
+		cmd = exec.CommandContext(sessionCtx, containerExec[0], fullArgs...)
+		// cmd.Dir is irrelevant when execing into a container; -w handles it.
+	} else {
+		cmd = exec.CommandContext(sessionCtx, "claude", args...)
+		cmd.Dir = workDir
+	}
 	// Filter out CLAUDECODE env var to prevent "nested session" detection,
 	// since cc-connect is a bridge, not a nested Claude Code session.
 	env := filterEnv(os.Environ(), "CLAUDECODE")

@@ -530,6 +530,21 @@ const (
 	MsgWsCloneProgress         MsgKey = "ws_clone_progress"
 	MsgWsCloneSuccess          MsgKey = "ws_clone_success"
 	MsgWsCloneFailed           MsgKey = "ws_clone_failed"
+
+	// Boq (container isolation) messages
+	MsgBoqNotEnabled        MsgKey = "boq_not_enabled"
+	MsgBoqUsage             MsgKey = "boq_usage"
+	MsgBoqEnterUsage         MsgKey = "boq_bind_usage"
+	MsgBoqStatusUnbound     MsgKey = "boq_status_unbound"
+	MsgBoqStatusBound       MsgKey = "boq_status_bound"
+	MsgBoqContainerNotRunning MsgKey = "boq_container_not_running"
+	MsgBoqBound             MsgKey = "boq_bound"
+	MsgBoqNotBound          MsgKey = "boq_not_bound"
+	MsgBoqUnbound           MsgKey = "boq_unbound"
+	MsgBoqListEmpty         MsgKey = "boq_list_empty"
+	MsgBoqListTitle         MsgKey = "boq_list_title"
+	MsgBoqListHint          MsgKey = "boq_list_hint"
+	MsgBoqInvalidIndex      MsgKey = "boq_invalid_index"
 )
 
 var messages = map[MsgKey]map[Language]string{
@@ -3549,6 +3564,99 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 克隆倉庫失敗: %v",
 		LangJapanese:           "❌ リポジトリのクローンに失敗しました: %v",
 		LangSpanish:            "❌ Error al clonar repositorio: %v",
+	},
+
+	// Boq (container isolation) messages
+	MsgBoqNotEnabled: {
+		LangEnglish:            "Boq commands are not available. Initialize boq bindings first.",
+		LangChinese:            "Boq 命令不可用，请先初始化 boq 绑定。",
+		LangTraditionalChinese: "Boq 命令不可用，請先初始化 boq 綁定。",
+		LangJapanese:           "Boq コマンドは利用できません。先に boq バインディングを初期化してください。",
+		LangSpanish:            "Los comandos boq no están disponibles. Inicialice los enlaces boq primero.",
+	},
+	MsgBoqUsage: {
+		LangEnglish:            "Usage: `/boq enter <name|number>` | `/boq exit` | `/boq list` | `/boq`",
+		LangChinese:            "用法: `/boq enter <名称|序号>` | `/boq exit` | `/boq list` | `/boq`",
+		LangTraditionalChinese: "用法: `/boq enter <名稱|序號>` | `/boq exit` | `/boq list` | `/boq`",
+		LangJapanese:           "使い方: `/boq enter <名前|番号>` | `/boq exit` | `/boq list` | `/boq`",
+		LangSpanish:            "Uso: `/boq enter <nombre|número>` | `/boq exit` | `/boq list` | `/boq`",
+	},
+	MsgBoqEnterUsage: {
+		LangEnglish:            "Usage: `/boq enter <name|number> [workspace]`\nExample: `/boq enter dev` or `/boq enter dev milvus`",
+		LangChinese:            "用法: `/boq enter <名称|序号> [工作区]`\n示例: `/boq enter dev` 或 `/boq enter dev milvus`",
+		LangTraditionalChinese: "用法: `/boq enter <名稱|序號> [工作區]`\n範例: `/boq enter dev` 或 `/boq enter dev milvus`",
+		LangJapanese:           "使い方: `/boq enter <名前|番号> [ワークスペース]`\n例: `/boq enter dev` または `/boq enter dev milvus`",
+		LangSpanish:            "Uso: `/boq enter <nombre|número> [workspace]`\nEjemplo: `/boq enter dev` o `/boq enter dev milvus`",
+	},
+	MsgBoqStatusUnbound: {
+		LangEnglish:            "📦 No boq bound to this channel. Use `/boq bind <name>` to bind one.",
+		LangChinese:            "📦 当前频道未绑定 boq。使用 `/boq bind <名称>` 绑定。",
+		LangTraditionalChinese: "📦 當前頻道未綁定 boq。使用 `/boq bind <名稱>` 綁定。",
+		LangJapanese:           "📦 このチャンネルに boq はバインドされていません。`/boq bind <名前>` でバインドしてください。",
+		LangSpanish:            "📦 No hay boq vinculado a este canal. Use `/boq bind <nombre>` para vincular uno.",
+	},
+	MsgBoqStatusBound: {
+		LangEnglish:            "📦 Bound to boq **%s** (runtime: %s)\nAll operations execute inside the container.",
+		LangChinese:            "📦 已绑定 boq **%s**（运行时: %s）\n所有操作在容器内执行。",
+		LangTraditionalChinese: "📦 已綁定 boq **%s**（運行時: %s）\n所有操作在容器內執行。",
+		LangJapanese:           "📦 boq **%s** にバインド中（ランタイム: %s）\nすべての操作はコンテナ内で実行されます。",
+		LangSpanish:            "📦 Vinculado a boq **%s** (runtime: %s)\nTodas las operaciones se ejecutan dentro del contenedor.",
+	},
+	MsgBoqContainerNotRunning: {
+		LangEnglish:            "❌ Boq container **%s** is not running: %v\nStart it first with `boq create %s` or `boq enter %s`.",
+		LangChinese:            "❌ Boq 容器 **%s** 未运行: %v\n请先执行 `boq create %s` 或 `boq enter %s`。",
+		LangTraditionalChinese: "❌ Boq 容器 **%s** 未運行: %v\n請先執行 `boq create %s` 或 `boq enter %s`。",
+		LangJapanese:           "❌ Boq コンテナ **%s** は実行されていません: %v\n先に `boq create %s` または `boq enter %s` を実行してください。",
+		LangSpanish:            "❌ El contenedor boq **%s** no está en ejecución: %v\nInícielo primero con `boq create %s` o `boq enter %s`.",
+	},
+	MsgBoqBound: {
+		LangEnglish:            "📦 Bound to boq **%s** (runtime: %s). All operations now execute inside the container.",
+		LangChinese:            "📦 已绑定 boq **%s**（运行时: %s）。所有操作现在在容器内执行。",
+		LangTraditionalChinese: "📦 已綁定 boq **%s**（運行時: %s）。所有操作現在在容器內執行。",
+		LangJapanese:           "📦 boq **%s** にバインドしました（ランタイム: %s）。すべての操作がコンテナ内で実行されます。",
+		LangSpanish:            "📦 Vinculado a boq **%s** (runtime: %s). Todas las operaciones ahora se ejecutan dentro del contenedor.",
+	},
+	MsgBoqNotBound: {
+		LangEnglish:            "No boq is bound to this channel.",
+		LangChinese:            "当前频道未绑定 boq。",
+		LangTraditionalChinese: "當前頻道未綁定 boq。",
+		LangJapanese:           "このチャンネルに boq はバインドされていません。",
+		LangSpanish:            "No hay boq vinculado a este canal.",
+	},
+	MsgBoqUnbound: {
+		LangEnglish:            "📦 Unbound from boq **%s**. Operations now execute on the host.",
+		LangChinese:            "📦 已解绑 boq **%s**。操作现在在宿主机上执行。",
+		LangTraditionalChinese: "📦 已解綁 boq **%s**。操作現在在宿主機上執行。",
+		LangJapanese:           "📦 boq **%s** のバインドを解除しました。操作はホスト上で実行されます。",
+		LangSpanish:            "📦 Desvinculado de boq **%s**. Las operaciones ahora se ejecutan en el host.",
+	},
+	MsgBoqListEmpty: {
+		LangEnglish:            "📦 No running boq containers found.",
+		LangChinese:            "📦 没有找到运行中的 boq 容器。",
+		LangTraditionalChinese: "📦 沒有找到運行中的 boq 容器。",
+		LangJapanese:           "📦 実行中の boq コンテナが見つかりません。",
+		LangSpanish:            "📦 No se encontraron contenedores boq en ejecución.",
+	},
+	MsgBoqListTitle: {
+		LangEnglish:            "📦 **Running boq instances:**",
+		LangChinese:            "📦 **运行中的 boq 实例:**",
+		LangTraditionalChinese: "📦 **運行中的 boq 實例:**",
+		LangJapanese:           "📦 **実行中の boq インスタンス:**",
+		LangSpanish:            "📦 **Instancias boq en ejecución:**",
+	},
+	MsgBoqListHint: {
+		LangEnglish:            "Use `/boq enter <number>` or `/boq enter <name>` to enter.",
+		LangChinese:            "使用 `/boq enter <序号>` 或 `/boq enter <名称>` 进入。",
+		LangTraditionalChinese: "使用 `/boq enter <序號>` 或 `/boq enter <名稱>` 進入。",
+		LangJapanese:           "`/boq enter <番号>` または `/boq enter <名前>` で入れます。",
+		LangSpanish:            "Use `/boq enter <número>` o `/boq enter <nombre>` para entrar.",
+	},
+	MsgBoqInvalidIndex: {
+		LangEnglish:            "❌ Invalid index **%d**. Use `/boq list` to see available instances.",
+		LangChinese:            "❌ 无效序号 **%d**。使用 `/boq list` 查看可用实例。",
+		LangTraditionalChinese: "❌ 無效序號 **%d**。使用 `/boq list` 查看可用實例。",
+		LangJapanese:           "❌ 無効なインデックス **%d**。`/boq list` で利用可能なインスタンスを確認してください。",
+		LangSpanish:            "❌ Índice inválido **%d**. Use `/boq list` para ver las instancias disponibles.",
 	},
 }
 

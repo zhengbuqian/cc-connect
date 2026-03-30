@@ -45,9 +45,10 @@ type Agent struct {
 	routerURL       string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
 	routerAPIKey    string // Claude Code Router API key (optional)
 
-	providerProxy  *core.ProviderProxy // local proxy for third-party providers
-	proxyLocalURL  string              // local URL of the proxy
-	platformPrompt string              // platform-specific formatting instructions
+	providerProxy    *core.ProviderProxy // local proxy for third-party providers
+	proxyLocalURL    string              // local URL of the proxy
+	platformPrompt   string              // platform-specific formatting instructions
+	containerExec    []string            // container exec prefix (e.g. ["docker","exec","-i","-w","/dir","boq-dev"])
 
 	mu sync.RWMutex
 }
@@ -121,6 +122,12 @@ func normalizePermissionMode(raw string) string {
 func (a *Agent) Name() string           { return "claudecode" }
 func (a *Agent) CLIBinaryName() string  { return "claude" }
 func (a *Agent) CLIDisplayName() string { return "Claude" }
+
+func (a *Agent) SetContainerExec(prefix []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.containerExec = prefix
+}
 
 func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
@@ -271,9 +278,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
 	disableVerbose := a.routerURL != ""
+	containerExec := make([]string, len(a.containerExec))
+	copy(containerExec, a.containerExec)
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose)
+	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, containerExec)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
