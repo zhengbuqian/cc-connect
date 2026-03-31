@@ -183,7 +183,8 @@ type Engine struct {
 	outgoingRL       *OutgoingRateLimiter
 	streamPreview    StreamPreviewCfg
 	relayManager     *RelayManager
-	eventIdleTimeout time.Duration
+	eventIdleTimeout  time.Duration
+	bgListenTimeout   time.Duration
 	dirHistory       *DirHistory
 	baseWorkDir      string
 	projectState     *ProjectStateStore
@@ -261,6 +262,8 @@ type interactiveState struct {
 	deleteMode             *deleteModeState
 	lastAutoCompressAt     time.Time
 	lastAutoCompressTokens int
+	bgListening            bool           // true while a background-listen goroutine is active
+	bgWakeUp               chan struct{}   // closed to signal background-listen goroutine to exit
 }
 
 type deleteModeState struct {
@@ -340,6 +343,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		startedAt:             time.Now(),
 		streamPreview:         DefaultStreamPreviewCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
+		bgListenTimeout:       defaultBgListenTimeout,
 		showContextIndicator:  true,
 	}
 
@@ -358,11 +362,11 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 }
 
 // SetMultiWorkspace enables multi-workspace mode for the engine.
-func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
+func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string, idleTimeout time.Duration) {
 	e.multiWorkspace = true
 	e.baseDir = baseDir
 	e.workspaceBindings = NewWorkspaceBindingManager(bindingStorePath)
-	e.workspacePool = newWorkspacePool(15 * time.Minute)
+	e.workspacePool = newWorkspacePool(idleTimeout)
 	e.initFlows = make(map[string]*workspaceInitFlow)
 	go e.runIdleReaper()
 }
@@ -380,6 +384,25 @@ func (e *Engine) runIdleReaper() {
 			}
 			reaped := e.workspacePool.ReapIdle()
 			for _, ws := range reaped {
+				// Check if any session in this workspace is still alive;
+				// if so, keep the workspace and refresh its activity timestamp.
+				hasAlive := false
+				e.interactiveMu.Lock()
+				for _, state := range e.interactiveStates {
+					if state.workspaceDir == ws && state.agentSession != nil && state.agentSession.Alive() {
+						hasAlive = true
+						break
+					}
+				}
+				e.interactiveMu.Unlock()
+
+				if hasAlive {
+					// Re-add the workspace and touch it so it won't be reaped again immediately.
+					e.workspacePool.GetOrCreate(ws).Touch()
+					slog.Debug("workspace idle-reap skipped: active session", "workspace", ws)
+					continue
+				}
+
 				e.interactiveMu.Lock()
 				for key, state := range e.interactiveStates {
 					if state.workspaceDir == ws {
@@ -741,6 +764,13 @@ func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 // 0 disables the timeout entirely.
 func (e *Engine) SetEventIdleTimeout(d time.Duration) {
 	e.eventIdleTimeout = d
+}
+
+// SetBgListenTimeout sets how long the background-listen goroutine waits for
+// post-turn agent events (e.g. background task completion) before exiting.
+// 0 disables background listening entirely.
+func (e *Engine) SetBgListenTimeout(d time.Duration) {
+	e.bgListenTimeout = d
 }
 
 func (e *Engine) SetRelayManager(rm *RelayManager) {
@@ -1786,9 +1816,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 	}()
 
-	// Drain any stale events left in the channel from a previous turn.
-	// This prevents the next processInteractiveEvents from reading an old
-	// EventResult that was pushed after the previous turn already returned.
+	// Stop any background-listen goroutine from the previous turn before
+	// draining, so it does not race with the new turn's event consumption.
+	stopBgListen(state)
 	drainEvents(state.agentSession.Events())
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.Platform, msg.SessionKey)
@@ -2079,6 +2109,7 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 }
 
 const defaultEventIdleTimeout = 2 * time.Hour
+const defaultBgListenTimeout = 1 * time.Hour
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
 	var textParts []string
@@ -2175,6 +2206,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 			idleTimer.Reset(e.eventIdleTimeout)
+		}
+
+		// Touch workspace so the idle reaper knows this workspace is still active.
+		if e.workspacePool != nil {
+			state.mu.Lock()
+			wsDir := state.workspaceDir
+			state.mu.Unlock()
+			if wsDir != "" {
+				if ws := e.workspacePool.Get(wsDir); ws != nil {
+					ws.Touch()
+				}
+			}
 		}
 
 		if !firstEventLogged {
@@ -2543,9 +2586,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
 				}
 
-				// Drain stale events before starting the next turn. Between
-				// EventResult and Send(), the only buffered events would be
-				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
+				// Stop background listener and drain stale events before starting
+				// the next turn.
+				stopBgListen(state)
 				drainEvents(state.agentSession.Events())
 
 				if pendingSend != nil {
@@ -2601,6 +2644,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					slog.Debug("async send error after EventResult", "error", err)
 				}
 			}
+
+			// Start background-listen goroutine to capture post-turn events
+			// (e.g. when Claude Code completes a background task and wakes up).
+			e.startBgListen(state, sessionKey, events)
 			return
 
 		case EventError:
@@ -2700,6 +2747,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			return false
 		}
 
+		stopBgListen(state)
 		drainEvents(state.agentSession.Events())
 
 		session.AddHistory("user", queued.content)
@@ -5280,6 +5328,7 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	state.replyCtx = replyCtx
 	state.mu.Unlock()
 
+	stopBgListen(state)
 	drainEvents(state.agentSession.Events())
 
 	compressor, ok := e.agent.(ContextCompressor)
@@ -6012,6 +6061,138 @@ func drainEvents(ch <-chan Event) {
 				slog.Warn("drained stale events from previous turn", "count", drained)
 			}
 			return
+		}
+	}
+}
+
+// startBgListen spawns a goroutine that continues reading agent events after a
+// turn has ended (EventResult received). This captures output from background
+// tasks that wake the agent up after the main turn is complete. The goroutine
+// exits when: (a) a new user message arrives (bgWakeUp is closed), (b) the
+// bgListenTimeout expires, (c) the events channel closes, or (d) the engine
+// context is cancelled.
+func (e *Engine) startBgListen(state *interactiveState, sessionKey string, events <-chan Event) {
+	if e.bgListenTimeout <= 0 {
+		return
+	}
+
+	state.mu.Lock()
+	if state.bgListening {
+		// Already listening (shouldn't happen, but be safe).
+		state.mu.Unlock()
+		return
+	}
+	state.bgListening = true
+	state.bgWakeUp = make(chan struct{})
+	wakeUp := state.bgWakeUp
+	state.mu.Unlock()
+
+	go func() {
+		defer func() {
+			state.mu.Lock()
+			state.bgListening = false
+			state.bgWakeUp = nil
+			state.mu.Unlock()
+		}()
+
+		timer := time.NewTimer(e.bgListenTimeout)
+		defer timer.Stop()
+
+		slog.Info("background listen started", "session", sessionKey, "timeout", e.bgListenTimeout)
+
+		sentText := false // track whether EventText already forwarded content
+		for {
+			select {
+			case event, ok := <-events:
+				if !ok {
+					slog.Info("background listen: channel closed", "session", sessionKey)
+					return
+				}
+				timer.Reset(e.bgListenTimeout)
+
+				state.mu.Lock()
+				p := state.platform
+				rctx := state.replyCtx
+				state.mu.Unlock()
+
+				switch event.Type {
+				case EventText:
+					if event.Content != "" {
+						sentText = true
+						for _, chunk := range splitMessage(event.Content, maxPlatformMessageLen) {
+							e.send(p, rctx, chunk)
+						}
+					}
+				case EventResult:
+					// Only send EventResult content if nothing was already
+					// forwarded via EventText — otherwise it's a duplicate.
+					if !sentText && event.Content != "" {
+						for _, chunk := range splitMessage(event.Content, maxPlatformMessageLen) {
+							e.send(p, rctx, chunk)
+						}
+					}
+					slog.Info("background listen: task completed", "session", sessionKey)
+					// Don't return — Claude Code can emit multiple rounds of
+					// post-turn events (e.g. background Agent completes, then
+					// Claude processes the result and emits more events). Reset
+					// state and keep listening for subsequent rounds.
+					sentText = false
+					timer.Reset(e.bgListenTimeout)
+				case EventError:
+					if event.Error != nil {
+						e.send(p, rctx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
+					}
+					return
+				}
+
+			case <-wakeUp:
+				slog.Info("background listen: interrupted by new message", "session", sessionKey)
+				return
+
+			case <-timer.C:
+				slog.Info("background listen: timeout", "session", sessionKey, "timeout", e.bgListenTimeout)
+				return
+
+			case <-e.ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// stopBgListen signals the background-listen goroutine (if any) to exit and
+// waits briefly for it to clear the bgListening flag. Called before draining
+// events for a new turn so the goroutine does not race with the new turn's
+// event consumption.
+func stopBgListen(state *interactiveState) {
+	state.mu.Lock()
+	if !state.bgListening || state.bgWakeUp == nil {
+		state.mu.Unlock()
+		return
+	}
+	ch := state.bgWakeUp
+	state.mu.Unlock()
+
+	// Signal the goroutine to exit.
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+
+	// Wait for the goroutine to clear bgListening (up to 100ms).
+	deadline := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case <-deadline:
+			return
+		default:
+			state.mu.Lock()
+			done := !state.bgListening
+			state.mu.Unlock()
+			if done {
+				return
+			}
+			time.Sleep(time.Millisecond)
 		}
 	}
 }

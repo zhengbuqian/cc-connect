@@ -38,7 +38,8 @@ type Config struct {
 	Webhook         WebhookConfig       `toml:"webhook"`
 	Bridge          BridgeConfig        `toml:"bridge"`
 	Management      ManagementConfig    `toml:"management"`
-	IdleTimeoutMins *int                `toml:"idle_timeout_mins,omitempty"` // max minutes between agent events; 0 = no timeout; default 120
+	IdleTimeoutMins    *int             `toml:"idle_timeout_mins,omitempty"`      // max minutes between agent events; 0 = no timeout; default 120
+	BgListenTimeoutMins *int           `toml:"bg_listen_timeout_mins,omitempty"` // how long to listen for background task events after turn ends; 0 = disabled; default 60
 }
 
 // CronConfig controls cron job behavior.
@@ -200,9 +201,10 @@ type ProjectConfig struct {
 	ShowContextIndicator *bool        `toml:"show_context_indicator,omitempty"`
 	Quiet                *bool        `toml:"quiet,omitempty"`             // project-level quiet mode; overrides global setting
 	InjectSender         *bool        `toml:"inject_sender,omitempty"`     // prepend sender identity (platform + user ID) to each message sent to the agent
-	DisabledCommands     []string     `toml:"disabled_commands,omitempty"` // commands to disable for this project (e.g. ["restart", "upgrade"])
-	AdminFrom            string       `toml:"admin_from,omitempty"`        // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
-	Users                *UsersConfig `toml:"users,omitempty"`             // per-user role config; nil = legacy behavior
+	DisabledCommands          []string     `toml:"disabled_commands,omitempty"`           // commands to disable for this project (e.g. ["restart", "upgrade"])
+	AdminFrom                 string       `toml:"admin_from,omitempty"`                  // comma-separated user IDs allowed to run privileged commands; "*" = all allowed users
+	Users                     *UsersConfig `toml:"users,omitempty"`                       // per-user role config; nil = legacy behavior
+	WorkspaceIdleTimeoutMins  *int         `toml:"workspace_idle_timeout_mins,omitempty"` // minutes before idle workspace is reaped; default 120
 }
 
 type AgentConfig struct {

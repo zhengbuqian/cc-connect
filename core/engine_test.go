@@ -623,7 +623,7 @@ func TestEngineSendToSessionWithAttachments_MultiWorkspaceRawSessionKey(t *testi
 
 	baseDir := t.TempDir()
 	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SetMultiWorkspace(baseDir, bindingPath, 15*time.Minute)
 
 	wsDir := filepath.Join(baseDir, "ws1")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
@@ -1733,7 +1733,7 @@ func TestCmdList_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SetMultiWorkspace(baseDir, bindingPath, 15*time.Minute)
 
 	wsDir := filepath.Join(baseDir, "ws1")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
@@ -1772,7 +1772,7 @@ func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	// Set up multi-workspace with proper bindings so interactiveKeyForSessionKey works
 	wsDir := t.TempDir()
 	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(t.TempDir(), bindingPath)
+	e.SetMultiWorkspace(t.TempDir(), bindingPath, 15*time.Minute)
 
 	channelID := "C123"
 	e.workspaceBindings.Bind("project:test", channelID, "chan", wsDir)
@@ -1838,7 +1838,7 @@ func TestHandleMessage_MultiWorkspacePreservesCCSessionKey(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SetMultiWorkspace(baseDir, bindingPath, 15*time.Minute)
 
 	wsDir := filepath.Join(baseDir, "ws1")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
@@ -2785,7 +2785,7 @@ func TestCmdModel_MultiWorkspaceUsesWorkspaceAgentAndSessions(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SetMultiWorkspace(baseDir, bindingPath, 15*time.Minute)
 
 	wsDir := normalizeWorkspacePath(t.TempDir())
 	channelID := "C-model"
@@ -2845,7 +2845,7 @@ func TestGetOrCreateWorkspaceAgent_InheritsActiveProvider(t *testing.T) {
 		},
 	}
 	e := NewEngine("test", globalAgent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
-	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"))
+	e.SetMultiWorkspace(t.TempDir(), filepath.Join(t.TempDir(), "bindings.json"), 15*time.Minute)
 
 	wsAgentRaw, _, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(t.TempDir()))
 	if err != nil {
@@ -4157,7 +4157,7 @@ func TestSessionMismatch_RecyclesStaleAgent(t *testing.T) {
 	// The active Session now wants a DIFFERENT agent session ID.
 	session := &Session{AgentSessionID: "new-agent-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, &Message{ReplyCtx: "ctx"}, session, e.sessions, nil, "")
 
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent session to be replaced")
@@ -4194,7 +4194,7 @@ func TestSessionClearedAfterNew_RecyclesAliveAgent(t *testing.T) {
 
 	session := &Session{AgentSessionID: ""}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, &Message{ReplyCtx: "ctx"}, session, e.sessions, nil, "")
 	if state.agentSession == oldSess {
 		t.Fatal("expected stale agent to be recycled when AgentSessionID was cleared")
 	}
@@ -4230,7 +4230,7 @@ func TestSessionMismatch_DoesNotLeakQuiet(t *testing.T) {
 	// Active session wants "new-id", which mismatches "old-id".
 	session := &Session{AgentSessionID: "new-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, &Message{ReplyCtx: "ctx"}, session, e.sessions, nil, "")
 
 	state.mu.Lock()
 	q := state.quiet
@@ -4261,7 +4261,7 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
 
 	session := &Session{AgentSessionID: "matching-id"}
 
-	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith(key, p, &Message{ReplyCtx: "ctx"}, session, e.sessions, nil, "")
 	if state != existingState {
 		t.Fatal("expected existing state to be reused when session IDs match")
 	}
@@ -4279,7 +4279,7 @@ func TestSessionIDWriteback_ImmediateAfterStartSession(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: ""} // empty — no prior binding
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, &Message{ReplyCtx: "ctx"}, session, e.sessions, nil, "")
 
 	got := session.GetAgentSessionID()
 
@@ -4299,7 +4299,7 @@ func TestSessionIDWriteback_DoesNotOverwriteExisting(t *testing.T) {
 	key := "test:user1"
 	session := &Session{AgentSessionID: "existing-uuid"}
 
-	e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
+	e.getOrCreateInteractiveStateWith(key, p, &Message{ReplyCtx: "ctx"}, session, e.sessions, nil, "")
 
 	got := session.GetAgentSessionID()
 
@@ -4335,7 +4335,7 @@ func TestStaleGoroutineCleanup_RaceSimulation(t *testing.T) {
 
 	// Step 3: New turn creates Session B and calls getOrCreateInteractiveStateWith.
 	sessionB := &Session{AgentSessionID: ""}
-	newState := e.getOrCreateInteractiveStateWith(key, p, "ctx", sessionB, e.sessions, nil, "")
+	newState := e.getOrCreateInteractiveStateWith(key, p, &Message{ReplyCtx: "ctx"}, sessionB, e.sessions, nil, "")
 
 	// Verify S2 is in the map.
 	e.interactiveMu.Lock()
@@ -4661,7 +4661,7 @@ func TestResumeFailureFallbackToFreshSession(t *testing.T) {
 	session.SetAgentSessionID("old-session-id", "stub")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user1", p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith("test:user1", p, &Message{ReplyCtx: "ctx"}, session, e.sessions, nil, "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil after fallback")
@@ -4699,7 +4699,7 @@ func TestFreshSessionWithoutSavedSessionIDStartsFresh(t *testing.T) {
 	session := e.sessions.GetOrCreateActive("test:user2")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user2", p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith("test:user2", p, &Message{ReplyCtx: "ctx"}, session, e.sessions, nil, "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil")
@@ -4736,7 +4736,7 @@ func TestWorkspaceReconnectWithSavedSessionIDUsesExactResume(t *testing.T) {
 	session.SetAgentSessionID("saved-session-id", "stub")
 
 	p := &stubPlatformEngine{n: "test"}
-	state := e.getOrCreateInteractiveStateWith("test:user3", p, "ctx", session, e.sessions, nil, "")
+	state := e.getOrCreateInteractiveStateWith("test:user3", p, &Message{ReplyCtx: "ctx"}, session, e.sessions, nil, "")
 
 	if state.agentSession == nil {
 		t.Fatal("expected agentSession to be non-nil")
@@ -5277,7 +5277,7 @@ func TestExecuteCardAction_ModelUsesWorkspaceContext(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SetMultiWorkspace(baseDir, bindingPath, 15*time.Minute)
 
 	wsDir := normalizeWorkspacePath(t.TempDir())
 	channelID := "channel1"
@@ -5329,7 +5329,7 @@ func TestHandleCardNav_ModelCardUsesWorkspaceAgent(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SetMultiWorkspace(baseDir, bindingPath, 15*time.Minute)
 
 	wsDir := normalizeWorkspacePath(t.TempDir())
 	channelID := "channel-nav"
@@ -6105,7 +6105,7 @@ func TestRenderStatusCard_UsesInteractiveKeyForRawSessionKeyInMultiWorkspace(t *
 
 	baseDir := t.TempDir()
 	bindingPath := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindingPath)
+	e.SetMultiWorkspace(baseDir, bindingPath, 15*time.Minute)
 
 	wsDir := filepath.Join(baseDir, "ws1")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
@@ -6468,7 +6468,7 @@ func TestCmdShell_MultiWorkspaceUsesSharedBindingWorkDir(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	wsDir := filepath.Join(baseDir, "shared-shell-workspace")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
@@ -6507,7 +6507,7 @@ func TestCmdShell_MultiWorkspaceIgnoresMissingSharedBinding(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	missingDir := filepath.Join(baseDir, "missing-shared-workspace")
 	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-shell", missingDir)
@@ -6563,7 +6563,7 @@ func TestWorkspace_Bind_Unbind_List(t *testing.T) {
 		t.Fatal(err)
 	}
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	// Bind
 	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace bind my-project", ReplyCtx: "ctx"}
@@ -6635,7 +6635,7 @@ func TestWorkspace_Bind_NonexistentDir(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace bind nonexistent", ReplyCtx: "ctx"}
 	e.handleCommand(p, msg, msg.Content)
@@ -6658,7 +6658,7 @@ func TestWorkspace_Route_ShowsCurrentAndSupportsSpaces(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	targetDir := filepath.Join(t.TempDir(), "routed project")
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
@@ -6694,7 +6694,7 @@ func TestWorkspace_Route_RejectsRelativePath(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route relative/path", ReplyCtx: "ctx"}
 	e.handleCommand(p, msg, msg.Content)
@@ -6714,7 +6714,7 @@ func TestWorkspace_Route_RejectsNonexistentPath(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	missingPath := filepath.Join(t.TempDir(), "missing")
 	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace route " + missingPath, ReplyCtx: "ctx"}
@@ -6735,7 +6735,7 @@ func TestWorkspace_Route_RejectsFileTarget(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	fileTarget := filepath.Join(t.TempDir(), "workspace.txt")
 	if err := os.WriteFile(fileTarget, []byte("not a dir"), 0o644); err != nil {
@@ -6760,7 +6760,7 @@ func TestWorkspace_NoArgs_ShowsCurrent(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	// No binding yet — should show "no binding"
 	msg := &Message{SessionKey: "test:ch1:user1", Content: "/workspace", ReplyCtx: "ctx"}
@@ -6778,7 +6778,7 @@ func TestWorkspace_NoArgs_ShowsSharedBinding(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	wsDir := filepath.Join(baseDir, "shared-project")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
@@ -6812,7 +6812,7 @@ func TestWorkspace_SharedBind_AllowsRegularUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	msg := &Message{
 		SessionKey: "test:ch1:user1",
@@ -6845,7 +6845,7 @@ func TestWorkspace_SharedBind_Unbind_List(t *testing.T) {
 		t.Fatal(err)
 	}
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	msg := &Message{
 		SessionKey: "test:ch1:user1",
@@ -6895,7 +6895,7 @@ func TestWorkspace_SharedRoute_Unbind_List(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	targetDir := filepath.Join(t.TempDir(), "shared routed workspace")
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
@@ -6954,7 +6954,7 @@ func TestWorkspace_SharedInit_BindsExistingDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	msg := &Message{
 		SessionKey: "test:ch1:user1",
@@ -6976,7 +6976,7 @@ func TestWorkspace_Unbind_SharedBindingShowsHint(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	wsDir := filepath.Join(baseDir, "shared-project")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
@@ -6999,7 +6999,7 @@ func TestWorkspace_NoArgs_IgnoresMissingSharedBinding(t *testing.T) {
 
 	baseDir := t.TempDir()
 	bindStore := filepath.Join(t.TempDir(), "bindings.json")
-	e.SetMultiWorkspace(baseDir, bindStore)
+	e.SetMultiWorkspace(baseDir, bindStore, 15*time.Minute)
 
 	missingDir := filepath.Join(baseDir, "missing-shared-project")
 	e.workspaceBindings.Bind(sharedWorkspaceBindingsKey, "ch1", "shared-project", missingDir)
