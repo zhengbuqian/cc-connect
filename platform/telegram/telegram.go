@@ -32,6 +32,7 @@ type replyContext struct {
 	chatID    int64
 	threadID  int
 	messageID int
+	topicName string // forum topic name, extracted from ReplyToMessage.ForumTopicCreated
 }
 
 // telegramBot abstracts the Telegram bot API methods for testability.
@@ -49,6 +50,7 @@ type telegramBot interface {
 	SetMyCommands(ctx context.Context, params *tgbot.SetMyCommandsParams) (bool, error)
 	GetFile(ctx context.Context, params *tgbot.GetFileParams) (*models.File, error)
 	FileDownloadLink(f *models.File) string
+	EditForumTopic(ctx context.Context, params *tgbot.EditForumTopicParams) (bool, error)
 }
 
 type backoffTimer interface {
@@ -354,7 +356,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		}
 	}
 
-	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
+	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID, topicName: extractTopicName(msg)}
 	botName := p.botUsername()
 
 	if len(msg.Photo) > 0 {
@@ -1378,6 +1380,45 @@ func (p *Platform) Stop() error {
 		cancel()
 	}
 	return nil
+}
+
+// RenameTopic renames a Telegram forum topic. Only works for forum-enabled groups.
+func (p *Platform) RenameTopic(ctx context.Context, rctx any, name string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.threadID == 0 {
+		return fmt.Errorf("telegram: not a forum topic")
+	}
+	bot, err := p.connectedBot("rename-topic")
+	if err != nil {
+		return err
+	}
+	_, err = bot.EditForumTopic(ctx, &tgbot.EditForumTopicParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Name:            name,
+	})
+	return err
+}
+
+// extractTopicName returns the forum topic name from a message, if available.
+// In Telegram forums, messages have ReplyToMessage pointing to the topic creation message.
+func extractTopicName(msg *models.Message) string {
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.ForumTopicCreated != nil {
+		return msg.ReplyToMessage.ForumTopicCreated.Name
+	}
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.ForumTopicEdited != nil {
+		return msg.ReplyToMessage.ForumTopicEdited.Name
+	}
+	return ""
+}
+
+// TopicName returns the current forum topic name from the reply context.
+func (p *Platform) TopicName(_ context.Context, rctx any) string {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return ""
+	}
+	return rc.topicName
 }
 
 // RegisterCommands registers bot commands with Telegram for the command menu.
