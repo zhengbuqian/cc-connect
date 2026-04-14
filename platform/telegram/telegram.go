@@ -3,12 +3,14 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +23,24 @@ import (
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
+
+const tgLogFile = "/tmp/telegram_ccconnect.log"
+
+func tgLog(op string, fields map[string]any) {
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	fields["op"] = op
+	fields["ts"] = time.Now().Format(time.RFC3339Nano)
+	data, _ := json.Marshal(fields)
+	data = append(data, '\n')
+	f, err := os.OpenFile(tgLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(data)
+}
 
 var telegramConvertAudioToOpus = core.ConvertAudioToOpus
 
@@ -195,6 +215,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.bot = nil
 	p.selfUser = nil
 
+	tgLog("Start", map[string]any{"status": "started"})
 	go p.connectLoop(ctx)
 	return nil
 }
@@ -298,6 +319,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 	}
 
 	slog.Info("telegram: connected", "bot", me.Username)
+	tgLog("Connected", map[string]any{"bot": me.Username})
 	p.emitReady(gen)
 
 	// Start polling — blocks until ctx is cancelled or connection drops.
@@ -309,6 +331,7 @@ func (p *Platform) runConnection(ctx context.Context) error {
 
 func (p *Platform) processUpdate(ctx context.Context, update *models.Update) {
 	if update.CallbackQuery != nil {
+		tgLog("CallbackQuery", map[string]any{"from": update.CallbackQuery.From.ID, "data": update.CallbackQuery.Data})
 		p.handleCallbackQuery(ctx, update.CallbackQuery)
 		return
 	}
@@ -328,6 +351,19 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 	if msg.From == nil {
 		return
 	}
+	tgLog("ReceiveMessage", map[string]any{
+		"chat_id":    msg.Chat.ID,
+		"message_id": msg.ID,
+		"from":       msg.From.ID,
+		"username":   msg.From.Username,
+		"text":       msg.Text,
+		"caption":    msg.Caption,
+		"has_photo":  len(msg.Photo) > 0,
+		"has_voice":  msg.Voice != nil,
+		"has_audio":  msg.Audio != nil,
+		"has_doc":    msg.Document != nil,
+	})
+
 	userName := msg.From.Username
 	if userName == "" {
 		userName = strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
@@ -522,6 +558,7 @@ func (p *Platform) messageHandler() core.MessageHandler {
 // reactToMessage sets an emoji reaction on a Telegram message.
 // It is called asynchronously so it never blocks the message dispatch path.
 func (p *Platform) reactToMessage(ctx context.Context, chatID int64, messageID int, emoji string) {
+	tgLog("SetReaction", map[string]any{"chat_id": chatID, "message_id": messageID, "emoji": emoji})
 	bot, err := p.connectedBot("react")
 	if err != nil {
 		return
@@ -709,6 +746,7 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 	}
 
 	// Answer the callback to clear the loading indicator
+	tgLog("AnswerCallbackQuery", map[string]any{"callback_query_id": cb.ID})
 	if _, err := bot.AnswerCallbackQuery(ctx, &tgbot.AnswerCallbackQueryParams{CallbackQueryID: cb.ID}); err != nil {
 		slog.Debug("telegram: answer callback failed", "error", err)
 	}
@@ -941,6 +979,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
+	tgLog("Reply", map[string]any{"chat_id": rc.chatID, "thread_id": rc.threadID, "reply_to": rc.messageID, "content": content})
 	bot, err := p.connectedBot("reply")
 	if err != nil {
 		return err
@@ -962,6 +1001,7 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 			_, err = bot.SendMessage(ctx, params)
 		}
 		if err != nil {
+			tgLog("Reply_Error", map[string]any{"chat_id": rc.chatID, "error": err.Error()})
 			return fmt.Errorf("telegram: send: %w", err)
 		}
 	}
@@ -974,6 +1014,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	if !ok {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
+	tgLog("Send", map[string]any{"chat_id": rc.chatID, "thread_id": rc.threadID, "content": content})
 	bot, err := p.connectedBot("send")
 	if err != nil {
 		return err
@@ -994,6 +1035,7 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 			_, err = bot.SendMessage(ctx, params)
 		}
 		if err != nil {
+			tgLog("Send_Error", map[string]any{"chat_id": rc.chatID, "error": err.Error()})
 			return fmt.Errorf("telegram: send: %w", err)
 		}
 	}
@@ -1014,6 +1056,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 	if name == "" {
 		name = "image"
 	}
+	tgLog("SendImage", map[string]any{"chat_id": rc.chatID, "thread_id": rc.threadID, "filename": name, "size": len(img.Data)})
 	slog.Debug("telegram: sending image", "chat_id", rc.chatID, "name", name, "size", len(img.Data))
 	params := &tgbot.SendPhotoParams{
 		ChatID:          rc.chatID,
@@ -1021,6 +1064,7 @@ func (p *Platform) SendImage(ctx context.Context, rctx any, img core.ImageAttach
 		Photo:           &models.InputFileUpload{Filename: name, Data: bytes.NewReader(img.Data)},
 	}
 	if _, err := bot.SendPhoto(ctx, params); err != nil {
+		tgLog("SendImage_Error", map[string]any{"chat_id": rc.chatID, "error": err.Error()})
 		return fmt.Errorf("telegram: send image: %w", err)
 	}
 	return nil
@@ -1040,12 +1084,14 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	if name == "" {
 		name = "attachment"
 	}
+	tgLog("SendFile", map[string]any{"chat_id": rc.chatID, "thread_id": rc.threadID, "filename": name, "mime": file.MimeType, "size": len(file.Data)})
 	params := &tgbot.SendDocumentParams{
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Document:        &models.InputFileUpload{Filename: name, Data: bytes.NewReader(file.Data)},
 	}
 	if _, err := bot.SendDocument(ctx, params); err != nil {
+		tgLog("SendFile_Error", map[string]any{"chat_id": rc.chatID, "error": err.Error()})
 		return fmt.Errorf("telegram: send file: %w", err)
 	}
 	return nil
@@ -1058,6 +1104,8 @@ func (p *Platform) SendAudio(ctx context.Context, rctx any, audio []byte, format
 	if !ok {
 		return fmt.Errorf("telegram: SendAudio: invalid reply context type %T", rctx)
 	}
+	tgLog("SendAudio", map[string]any{"chat_id": rc.chatID, "thread_id": rc.threadID, "format": format, "size": len(audio)})
+
 	sendData := audio
 	sendFormat := strings.ToLower(strings.TrimSpace(format))
 	if sendFormat == "" {
@@ -1144,6 +1192,7 @@ func (p *Platform) SendWithButtons(ctx context.Context, rctx any, content string
 	if !ok {
 		return fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
+	tgLog("SendWithButtons", map[string]any{"chat_id": rc.chatID, "thread_id": rc.threadID, "content": content, "button_rows": len(buttons)})
 	bot, err := p.connectedBot("send with buttons")
 	if err != nil {
 		return err
@@ -1186,6 +1235,7 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 	if !ok {
 		return fmt.Errorf("telegram: invalid preview handle type %T", previewHandle)
 	}
+	tgLog("DeletePreviewMessage", map[string]any{"chat_id": h.chatID, "message_id": h.messageID})
 	bot, err := p.connectedBot("delete preview")
 	if err != nil {
 		return err
@@ -1198,6 +1248,7 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 }
 
 func (p *Platform) downloadFile(fileID string) ([]byte, error) {
+	tgLog("DownloadFile", map[string]any{"file_id": fileID})
 	bot, err := p.connectedBot("download file")
 	if err != nil {
 		return nil, err
@@ -1269,6 +1320,7 @@ func (p *Platform) SendPreviewStart(ctx context.Context, rctx any, content strin
 	if !ok {
 		return nil, fmt.Errorf("telegram: invalid reply context type %T", rctx)
 	}
+	tgLog("SendPreviewStart", map[string]any{"chat_id": rc.chatID, "thread_id": rc.threadID, "content": content})
 	bot, err := p.connectedBot("send preview")
 	if err != nil {
 		return nil, err
@@ -1302,6 +1354,7 @@ func (p *Platform) UpdateMessage(ctx context.Context, previewHandle any, content
 	if !ok {
 		return fmt.Errorf("telegram: invalid preview handle type %T", previewHandle)
 	}
+	tgLog("UpdateMessage", map[string]any{"chat_id": h.chatID, "message_id": h.messageID, "content": content})
 	bot, err := p.connectedBot("update message")
 	if err != nil {
 		return err
@@ -1351,6 +1404,8 @@ func (p *Platform) StartTyping(ctx context.Context, rctx any) (stop func()) {
 	if !ok {
 		return func() {}
 	}
+	tgLog("StartTyping", map[string]any{"chat_id": rc.chatID, "thread_id": rc.threadID})
+
 	params := &tgbot.SendChatActionParams{
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
@@ -1418,6 +1473,7 @@ func truncateTelegramBotDescription(s string) string {
 }
 
 func (p *Platform) Stop() error {
+	tgLog("Stop", map[string]any{"status": "stopping"})
 	p.mu.Lock()
 	if p.stopping {
 		p.mu.Unlock()
@@ -1474,6 +1530,7 @@ func (p *Platform) RegisterCommands(commands []core.BotCommandInfo) error {
 		return fmt.Errorf("telegram: setMyCommands failed: %w", err)
 	}
 
+	tgLog("RegisterCommands", map[string]any{"count": len(tgCommands)})
 	slog.Info("telegram: registered bot commands", "count", len(tgCommands))
 	return nil
 }
