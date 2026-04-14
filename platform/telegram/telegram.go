@@ -52,6 +52,7 @@ type replyContext struct {
 	chatID    int64
 	threadID  int
 	messageID int
+	topicName string // forum topic name, extracted from ReplyToMessage.ForumTopicCreated
 }
 
 // telegramBot abstracts the Telegram bot API methods for testability.
@@ -70,6 +71,7 @@ type telegramBot interface {
 	GetFile(ctx context.Context, params *tgbot.GetFileParams) (*models.File, error)
 	FileDownloadLink(f *models.File) string
 	SetMessageReaction(ctx context.Context, params *tgbot.SetMessageReactionParams) (bool, error)
+	EditForumTopic(ctx context.Context, params *tgbot.EditForumTopicParams) (bool, error)
 }
 
 type backoffTimer interface {
@@ -145,6 +147,10 @@ type Platform struct {
 	newBot              botFactory
 	newBackoffTimer     func(time.Duration) backoffTimer
 	newTypingTicker     func(time.Duration) typingTicker
+
+	// topicNames caches the latest known topic name per "chatID:threadID".
+	// Updated when we see ForumTopicEdited or ForumTopicCreated events.
+	topicNames sync.Map // map[string]string
 }
 
 const (
@@ -395,7 +401,15 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		}
 	}
 
-	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID}
+	topicName := extractTopicName(msg)
+	// Update the topic name cache whenever we see a name from the message.
+	// ForumTopicEdited takes priority (handled inside extractTopicName),
+	// so the cache always reflects the latest rename.
+	if threadID != 0 && topicName != "" {
+		p.topicNames.Store(fmt.Sprintf("%d:%d", msg.Chat.ID, threadID), topicName)
+	}
+
+	rctx := replyContext{chatID: msg.Chat.ID, threadID: threadID, messageID: msg.ID, topicName: topicName}
 	if p.reactOnReceive {
 		go p.reactToMessage(ctx, msg.Chat.ID, msg.ID, "⚡")
 	}
@@ -1490,6 +1504,73 @@ func (p *Platform) Stop() error {
 		cancel()
 	}
 	return nil
+}
+
+// RenameTopic renames a Telegram forum topic. Only works for forum-enabled groups.
+func (p *Platform) RenameTopic(ctx context.Context, rctx any, name string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.threadID == 0 {
+		return fmt.Errorf("telegram: not a forum topic")
+	}
+	tgLog("RenameTopic", map[string]any{"chat_id": rc.chatID, "thread_id": rc.threadID, "name": name})
+	bot, err := p.connectedBot("rename-topic")
+	if err != nil {
+		return err
+	}
+	_, err = bot.EditForumTopic(ctx, &tgbot.EditForumTopicParams{
+		ChatID:          rc.chatID,
+		MessageThreadID: rc.threadID,
+		Name:            name,
+	})
+	return err
+}
+
+// extractTopicName returns the forum topic name from a message, if available.
+// Priority: direct ForumTopicEdited (rename event) > ReplyToMessage.ForumTopicEdited
+// > direct ForumTopicCreated > ReplyToMessage.ForumTopicCreated.
+func extractTopicName(msg *models.Message) string {
+	// Direct edit event — this IS the rename notification message.
+	if msg.ForumTopicEdited != nil && msg.ForumTopicEdited.Name != "" {
+		return msg.ForumTopicEdited.Name
+	}
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.ForumTopicEdited != nil {
+		return msg.ReplyToMessage.ForumTopicEdited.Name
+	}
+	if msg.ForumTopicCreated != nil {
+		return msg.ForumTopicCreated.Name
+	}
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.ForumTopicCreated != nil {
+		return msg.ReplyToMessage.ForumTopicCreated.Name
+	}
+	return ""
+}
+
+// UpdateTopicNameCache updates the in-memory topic name cache for the given reply context.
+func (p *Platform) UpdateTopicNameCache(rctx any, name string) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.threadID == 0 {
+		return
+	}
+	key := fmt.Sprintf("%d:%d", rc.chatID, rc.threadID)
+	p.topicNames.Store(key, name)
+}
+
+// TopicName returns the current forum topic name from the reply context.
+// It first checks the in-memory cache (updated on ForumTopicEdited events),
+// falling back to the name embedded in the message's ReplyToMessage (which
+// may be stale — it reflects the name at topic creation, not after renames).
+func (p *Platform) TopicName(_ context.Context, rctx any) string {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return ""
+	}
+	if rc.threadID != 0 {
+		key := fmt.Sprintf("%d:%d", rc.chatID, rc.threadID)
+		if cached, ok := p.topicNames.Load(key); ok {
+			return cached.(string)
+		}
+	}
+	return rc.topicName
 }
 
 // RegisterCommands registers bot commands with Telegram for the command menu.

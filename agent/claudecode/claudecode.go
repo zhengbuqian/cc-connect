@@ -49,6 +49,7 @@ type Agent struct {
 	providerProxy    *core.ProviderProxy // local proxy for third-party providers
 	proxyLocalURL    string              // local URL of the proxy
 	platformPrompt   string              // platform-specific formatting instructions
+	containerExec    []string            // container exec prefix (e.g. ["docker","exec","-i","-w","/dir","boq-dev"])
 
 	// spawnOpts controls OS-user isolation via run_as_user. Zero value
 	// means legacy spawn as the supervisor user. See core/runas.go.
@@ -166,6 +167,12 @@ func (a *Agent) CLIDisplayName() string { return "Claude" }
 
 func (a *Agent) ResumeCommand(sessionID string) string {
 	return "claude --resume " + sessionID
+}
+
+func (a *Agent) SetContainerExec(prefix []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.containerExec = prefix
 }
 
 func (a *Agent) SetWorkDir(dir string) {
@@ -318,9 +325,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	// When router_url is set, --verbose conflicts with --output-format stream-json
 	// (verbose emits non-JSON text to stdout that corrupts the JSON stream).
 	disableVerbose := a.routerURL != ""
+	containerExec := make([]string, len(a.containerExec))
+	copy(containerExec, a.containerExec)
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok)
+	return newClaudeSession(ctx, a.workDir, model, sessionID, a.mode, tools, disTools, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, containerExec)
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {

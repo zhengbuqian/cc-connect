@@ -212,6 +212,10 @@ func (b *stubTelegramBot) SetMessageReaction(_ context.Context, _ *tgbot.SetMess
 	return true, nil
 }
 
+func (b *stubTelegramBot) EditForumTopic(_ context.Context, _ *tgbot.EditForumTopicParams) (bool, error) {
+	return true, nil
+}
+
 func (b *stubTelegramBot) SendMessageCallCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()

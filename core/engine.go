@@ -216,6 +216,9 @@ type Engine struct {
 	observeSessionKey string             // e.g. "slack:C123:U456" — target for forwarding
 	observeCancel     context.CancelFunc
 
+	// Boq (container isolation) bindings
+	boqBindings *BoqBindingManager
+
 	// Interactive agent session management
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
@@ -847,6 +850,27 @@ func (e *Engine) SetDirHistory(dh *DirHistory) {
 	e.dirHistory = dh
 }
 
+func (e *Engine) SetBoqBindings(m *BoqBindingManager) {
+	e.boqBindings = m
+}
+
+// lookupBoqBinding returns the boq binding for the given channel, or nil.
+func (e *Engine) lookupBoqBinding(channelKey string) *BoqBinding {
+	if e.boqBindings == nil {
+		return nil
+	}
+	return e.boqBindings.Lookup("project:"+e.name, channelKey)
+}
+
+// boqChannelKey returns the channel key to use for boq binding lookups.
+// In multi-workspace mode this is the workspace channel key; otherwise the session key.
+func (e *Engine) boqChannelKey(msg *Message) string {
+	if e.multiWorkspace {
+		return effectiveWorkspaceChannelKey(msg)
+	}
+	return msg.SessionKey
+}
+
 func (e *Engine) SetBaseWorkDir(dir string) {
 	e.baseWorkDir = dir
 }
@@ -1052,8 +1076,13 @@ func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error 
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", job.Exec)
-	cmd.Dir = workDir
+	var cmd *exec.Cmd
+	if bb := e.lookupBoqBinding(job.SessionKey); bb != nil {
+		cmd = ContainerExecCommand(ctx, bb.Runtime, "boq-"+bb.BoqName, workDir, job.Exec)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", job.Exec)
+		cmd.Dir = workDir
+	}
 	output, err := cmd.CombinedOutput()
 
 	if ctx.Err() == context.DeadlineExceeded {
@@ -1429,7 +1458,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Multi-workspace resolution
 	var wsAgent Agent
 	var wsSessions *SessionManager
-	var wsPoolKey string
+	var wsPoolKey string // pool key (includes boq qualifier when applicable)
 	if e.multiWorkspace {
 		channelID := effectiveChannelID(msg)
 		channelKey := effectiveWorkspaceChannelKey(msg)
@@ -1458,7 +1487,15 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			}
 		} else {
 			// Get or create the workspace's agent and session manager.
+			// Include boq name in pool key so same workspace + different boq = isolated agent.
+			var wsBoqName string
+			if bb := e.lookupBoqBinding(channelKey); bb != nil {
+				wsBoqName = bb.BoqName
+			}
 			wsPoolKey = workspace
+			if wsBoqName != "" {
+				wsPoolKey = workspace + "::boq:" + wsBoqName
+			}
 
 			// Touch for idle tracking
 			if ws := e.workspacePool.Get(wsPoolKey); ws != nil {
@@ -2072,8 +2109,13 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 // getOrCreateWorkspaceAgent returns (or creates) a per-workspace agent and session manager.
 // workspace must be a normalized path (from resolveWorkspace or normalizeWorkspacePath).
-func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionManager, error) {
+// An optional boqName qualifies the pool key so that the same workspace path with different
+// boq instances gets independent agents (and thus independent /dir state).
+func (e *Engine) getOrCreateWorkspaceAgent(workspace string, boqName ...string) (Agent, *SessionManager, error) {
 	poolKey := workspace
+	if len(boqName) > 0 && boqName[0] != "" {
+		poolKey = workspace + "::boq:" + boqName[0]
+	}
 	ws := e.workspacePool.GetOrCreate(poolKey)
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
@@ -2130,7 +2172,8 @@ func (e *Engine) getOrCreateWorkspaceAgent(workspace string) (Agent, *SessionMan
 		}
 	}
 
-	// Create per-workspace session manager — hash the full poolKey.
+	// Create per-workspace session manager — hash the full poolKey (not just workspace)
+	// so that different boq instances on the same workspace get separate session files.
 	h := sha256.Sum256([]byte(poolKey))
 	sessionFile := filepath.Join(filepath.Dir(e.sessions.StorePath()),
 		fmt.Sprintf("%s_ws_%s.json", e.name, hex.EncodeToString(h[:4])))
@@ -2258,6 +2301,20 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			prompt = fip.FormattingInstructions()
 		}
 		ppi.SetPlatformPrompt(prompt)
+	}
+
+	// Inject container exec prefix when a boq binding is active for this channel.
+	if ces, ok := agent.(ContainerExecSetter); ok {
+		if bb := e.lookupBoqBinding(e.boqChannelKey(msg)); bb != nil {
+			containerName := "boq-" + bb.BoqName
+			workDir := ""
+			if wd, ok := agent.(WorkDirSwitcher); ok {
+				workDir = wd.GetWorkDir()
+			}
+			ces.SetContainerExec(ContainerExecPrefix(bb.Runtime, containerName, workDir, true))
+		} else {
+			ces.SetContainerExec(nil)
+		}
 	}
 
 	// Check if context is already canceled (e.g. during shutdown/restart)
@@ -3123,6 +3180,7 @@ var builtinCommands = []struct {
 	{[]string{"delete", "del", "rm"}, "delete"},
 	{[]string{"bind"}, "bind"},
 	{[]string{"search", "find"}, "search"},
+	{[]string{"boq"}, "boq"},
 	{[]string{"shell", "sh", "exec", "run"}, "shell"},
 	{[]string{"show"}, "show"},
 	{[]string{"dir", "cd", "chdir", "workdir"}, "dir"},
@@ -3311,6 +3369,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdBind(p, msg, args)
 	case "search":
 		e.cmdSearch(p, msg, args)
+	case "boq":
+		e.cmdBoq(p, msg, args)
 	case "shell":
 		e.cmdShell(p, msg, raw)
 	case "diff":
@@ -3890,6 +3950,357 @@ func (e *Engine) cmdShow(p Platform, msg *Message, args []string) {
 	e.reply(p, msg.ReplyCtx, content)
 }
 
+const boqEmoji = "📦"
+
+func (e *Engine) cmdBoq(p Platform, msg *Message, args []string) {
+	if e.boqBindings == nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBoqNotEnabled))
+		return
+	}
+
+	channelKey := e.boqChannelKey(msg)
+	projectKey := "project:" + e.name
+
+	if len(args) == 0 {
+		// /boq — show status
+		b := e.lookupBoqBinding(channelKey)
+		if b == nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBoqStatusUnbound))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqStatusBound, b.BoqName, b.Runtime))
+		}
+		return
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "enter", "bind":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBoqEnterUsage))
+			return
+		}
+		boqName := args[1]
+
+		// Support binding by index from /boq list output
+		if idx, err := strconv.Atoi(boqName); err == nil && idx >= 1 {
+			names := listBoqContainerNames()
+			if idx > len(names) {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqInvalidIndex, idx))
+				return
+			}
+			boqName = names[idx-1]
+		}
+
+		// Optional workspace arg: /boq enter dev milvus or /boq enter dev /abs/path
+		if len(args) >= 3 && e.multiWorkspace {
+			wsArg := strings.Join(args[2:], " ")
+			wsPath := wsArg
+			if !filepath.IsAbs(wsPath) {
+				wsPath = filepath.Join(e.baseDir, wsPath)
+			}
+			if absPath, err := filepath.Abs(wsPath); err == nil {
+				wsPath = absPath
+			}
+			wsChannelKey := effectiveWorkspaceChannelKey(msg)
+			channelName := msg.ChatName
+			e.workspaceBindings.Bind("project:"+e.name, wsChannelKey, channelName, normalizeWorkspacePath(wsPath))
+			slog.Info("boq enter: auto-bound workspace", "workspace", wsPath, "boq", boqName)
+		}
+
+		e.boqBind(p, msg, channelKey, projectKey, boqName)
+		go e.boqShowEnv(p, msg)
+
+	case "create":
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBoqCreateUsage))
+			return
+		}
+		if b := e.lookupBoqBinding(channelKey); b != nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqCreateAlreadyBound, b.BoqName))
+			return
+		}
+		boqName := args[1]
+
+		go func() {
+			if ti, ok := p.(TypingIndicator); ok {
+				stop := ti.StartTyping(e.ctx, msg.ReplyCtx)
+				defer stop()
+			}
+
+			// Run boq create on the host
+			ctx, cancel := context.WithTimeout(e.ctx, 120*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "boq", "create", "--no-enter", boqName)
+			output, err := cmd.CombinedOutput()
+			result := strings.TrimSpace(string(output))
+			if err != nil {
+				if result == "" {
+					result = err.Error()
+				}
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ `boq create %s` failed:\n```\n%s\n```", boqName, result))
+				return
+			}
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ boq create %s\n```\n%s\n```", boqName, result))
+
+			// Auto-bind workspace if provided
+			if len(args) >= 3 && e.multiWorkspace {
+				wsArg := strings.Join(args[2:], " ")
+				wsPath := wsArg
+				if !filepath.IsAbs(wsPath) {
+					wsPath = filepath.Join(e.baseDir, wsPath)
+				}
+				if absPath, err := filepath.Abs(wsPath); err == nil {
+					wsPath = absPath
+				}
+				wsChannelKey := effectiveWorkspaceChannelKey(msg)
+				channelName := msg.ChatName
+				e.workspaceBindings.Bind("project:"+e.name, wsChannelKey, channelName, normalizeWorkspacePath(wsPath))
+			}
+
+			// Auto-enter the newly created boq
+			e.boqBind(p, msg, channelKey, projectKey, boqName)
+			e.boqShowEnv(p, msg)
+		}()
+
+	case "destroy":
+		b := e.lookupBoqBinding(channelKey)
+		var boqName string
+		if b != nil {
+			// Inside a boq
+			if len(args) >= 2 && args[1] != b.BoqName {
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqDestroyOtherWhileBound, args[1], b.BoqName))
+				return
+			}
+			boqName = b.BoqName
+		} else {
+			// Not in a boq — name is required
+			if len(args) < 2 {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBoqDestroyUsage))
+				return
+			}
+			boqName = args[1]
+		}
+
+		go func() {
+			if ti, ok := p.(TypingIndicator); ok {
+				stop := ti.StartTyping(e.ctx, msg.ReplyCtx)
+				defer stop()
+			}
+
+			// Exit boq if currently bound
+			if b != nil {
+				e.boqBindings.Unbind(projectKey, channelKey)
+				e.cleanupInteractiveState(e.interactiveKeyForMessage(msg))
+				e.boqUnbindWorkspace(msg)
+				e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqUnbound, b.BoqName))
+				e.boqRemoveTopicPrefix(p, msg.ReplyCtx)
+			}
+
+			// Run boq destroy on the host
+			ctx, cancel := context.WithTimeout(e.ctx, 120*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "boq", "destroy", boqName)
+			output, err := cmd.CombinedOutput()
+			result := strings.TrimSpace(string(output))
+			if err != nil {
+				if result == "" {
+					result = err.Error()
+				}
+				e.reply(p, msg.ReplyCtx, fmt.Sprintf("❌ `boq destroy %s` failed:\n```\n%s\n```", boqName, result))
+				return
+			}
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ boq destroy %s\n```\n%s\n```", boqName, result))
+			e.boqShowEnv(p, msg)
+		}()
+
+	case "list":
+		go func() {
+			names := listBoqContainerNames()
+			if len(names) == 0 {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBoqListEmpty))
+				return
+			}
+			currentBinding := e.lookupBoqBinding(channelKey)
+			var sb strings.Builder
+			sb.WriteString(e.i18n.T(MsgBoqListTitle))
+			for i, name := range names {
+				marker := "  "
+				if currentBinding != nil && currentBinding.BoqName == name {
+					marker = "▶ "
+				}
+				sb.WriteString(fmt.Sprintf("\n%s%d. **%s**", marker, i+1, name))
+			}
+			sb.WriteString("\n\n")
+			sb.WriteString(e.i18n.T(MsgBoqListHint))
+			e.reply(p, msg.ReplyCtx, sb.String())
+		}()
+
+	case "exit", "unbind":
+		b := e.lookupBoqBinding(channelKey)
+		if b == nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBoqNotBound))
+			return
+		}
+		oldName := b.BoqName
+
+		e.boqBindings.Unbind(projectKey, channelKey)
+
+		// Tear down current agent session
+		e.cleanupInteractiveState(e.interactiveKeyForMessage(msg))
+
+		// Unbind workspace
+		e.boqUnbindWorkspace(msg)
+
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqUnbound, oldName))
+
+		// Remove 📦 prefix from topic name
+		e.boqRemoveTopicPrefix(p, msg.ReplyCtx)
+
+		go e.boqShowEnv(p, msg)
+
+	default:
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBoqUsage))
+	}
+}
+
+func (e *Engine) boqBind(p Platform, msg *Message, channelKey, projectKey, boqName string) {
+	containerName := "boq-" + boqName
+
+	// Detect runtime and verify container is running
+	runtime, err := DetectContainerRuntime(containerName)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqContainerNotRunning, boqName, err, boqName, boqName))
+		return
+	}
+
+	binding := &BoqBinding{
+		BoqName: boqName,
+		Runtime: runtime,
+		BoundAt: time.Now(),
+	}
+
+	channelName := msg.ChatName
+	e.boqBindings.Bind(projectKey, channelKey, channelName, binding)
+
+	// Tear down current agent session so next message starts fresh inside boq
+	e.cleanupInteractiveState(e.interactiveKeyForMessage(msg))
+
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgBoqBound, boqName, runtime))
+
+	// Try to add 📦 prefix to topic/chat name
+	e.boqAddTopicPrefix(p, msg.ReplyCtx)
+}
+
+// boqAddTopicPrefix adds the 📦 emoji prefix to the current topic name.
+// It reads the current name from the platform and prepends the prefix,
+// so it always reflects the latest topic name regardless of renames.
+func (e *Engine) boqAddTopicPrefix(p Platform, replyCtx any) {
+	renamer, ok := p.(TopicRenamer)
+	if !ok {
+		return
+	}
+	current := renamer.TopicName(e.ctx, replyCtx)
+	if current == "" {
+		return
+	}
+	// Don't double-prefix
+	if strings.HasPrefix(current, boqEmoji) {
+		return
+	}
+	newName := boqEmoji + " " + current
+	if err := renamer.RenameTopic(e.ctx, replyCtx, newName); err != nil {
+		slog.Warn("boq: add topic prefix failed", "err", err)
+		return
+	}
+	// Update the platform's topic name cache so boqRemoveTopicPrefix can
+	// read the prefixed name back even after a restart.
+	if updater, ok := p.(TopicNameUpdater); ok {
+		updater.UpdateTopicNameCache(replyCtx, newName)
+	}
+}
+
+// boqUnbindWorkspace unbinds the workspace binding for the channel associated with
+// the given message. Called on /boq exit and /boq destroy to clean up workspace state.
+func (e *Engine) boqUnbindWorkspace(msg *Message) {
+	if !e.multiWorkspace {
+		return
+	}
+	wsChannelKey := effectiveWorkspaceChannelKey(msg)
+	projectKey := "project:" + e.name
+	if e.workspaceBindings.Lookup(projectKey, wsChannelKey) != nil {
+		e.workspaceBindings.Unbind(projectKey, wsChannelKey)
+		slog.Info("boq exit: unbound workspace", "channel_key", wsChannelKey)
+	}
+}
+
+// boqShowEnv runs `pwd && hostname` in the current execution context (container or host)
+// and sends the result to the user so they know their environment after a boq operation.
+func (e *Engine) boqShowEnv(p Platform, msg *Message) {
+	if ti, ok := p.(TypingIndicator); ok {
+		stop := ti.StartTyping(e.ctx, msg.ReplyCtx)
+		defer stop()
+	}
+
+	shellCmd := "pwd && hostname"
+
+	var workDir string
+	if e.multiWorkspace {
+		channelKey := effectiveWorkspaceChannelKey(msg)
+		if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
+			workDir = normalizeWorkspacePath(b.Workspace)
+		}
+	}
+	if workDir == "" {
+		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
+			workDir = wd.GetWorkDir()
+		}
+	}
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+
+	bb := e.lookupBoqBinding(e.boqChannelKey(msg))
+
+	ctx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	if bb != nil {
+		cmd = ContainerExecCommand(ctx, bb.Runtime, "boq-"+bb.BoqName, workDir, shellCmd)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", shellCmd)
+		cmd.Dir = workDir
+	}
+	output, _ := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(output))
+	if result != "" {
+		e.reply(p, msg.ReplyCtx, fmt.Sprintf("$ %s\n```\n%s\n```", shellCmd, result))
+	}
+}
+
+// boqRemoveTopicPrefix removes the 📦 emoji prefix from the current topic name.
+func (e *Engine) boqRemoveTopicPrefix(p Platform, replyCtx any) {
+	renamer, ok := p.(TopicRenamer)
+	if !ok {
+		return
+	}
+	current := renamer.TopicName(e.ctx, replyCtx)
+	if current == "" {
+		return
+	}
+	restored := strings.TrimPrefix(current, boqEmoji+" ")
+	restored = strings.TrimPrefix(restored, boqEmoji)
+	if restored == current {
+		return // no prefix to remove
+	}
+	if err := renamer.RenameTopic(e.ctx, replyCtx, restored); err != nil {
+		slog.Warn("boq: remove topic prefix failed", "err", err)
+		return
+	}
+	if updater, ok := p.(TopicNameUpdater); ok {
+		updater.UpdateTopicNameCache(replyCtx, restored)
+	}
+}
+
 func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 	// Strip the command prefix ("/shell ", "/sh ", "/exec ", "/run ")
 	shellCmd := raw
@@ -3916,12 +4327,20 @@ func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
 		workDir, _ = os.Getwd()
 	}
 
+	// Resolve boq binding for this channel
+	bb := e.lookupBoqBinding(e.boqChannelKey(msg))
+
 	go func() {
 		ctx, cancel := context.WithTimeout(e.ctx, 60*time.Second)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "sh", "-c", shellCmd)
-		cmd.Dir = workDir
+		var cmd *exec.Cmd
+		if bb != nil {
+			cmd = ContainerExecCommand(ctx, bb.Runtime, "boq-"+bb.BoqName, workDir, shellCmd)
+		} else {
+			cmd = exec.CommandContext(ctx, "sh", "-c", shellCmd)
+			cmd.Dir = workDir
+		}
 		output, err := cmd.CombinedOutput()
 
 		if ctx.Err() == context.DeadlineExceeded {
@@ -4145,9 +4564,33 @@ func (e *Engine) dirApply(agent Agent, sessions *SessionManager, interactiveKey,
 		newDir = absDir
 	}
 
-	info, err := os.Stat(newDir)
-	if err != nil || !info.IsDir() {
-		return e.i18n.Tf(MsgDirInvalidPath, newDir), ""
+	// Use channel key (not interactiveKey) for boq binding lookup, matching
+	// how boqChannelKey works — extractWorkspaceChannelKey in multi-workspace
+	// mode, sessionKey otherwise.
+	boqChanKey := sessionKey
+	if e.multiWorkspace {
+		e.interactiveMu.Lock()
+		ck := e.channelKeys[sessionKey]
+		e.interactiveMu.Unlock()
+		if ck == "" {
+			ck = extractWorkspaceChannelKey(sessionKey)
+		}
+		if ck != "" {
+			boqChanKey = ck
+		}
+	}
+	if bb := e.lookupBoqBinding(boqChanKey); bb != nil {
+		// Validate directory inside the container
+		ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
+		defer cancel()
+		if !ContainerDirExists(ctx, bb.Runtime, "boq-"+bb.BoqName, newDir) {
+			return e.i18n.Tf(MsgDirInvalidPath, newDir), ""
+		}
+	} else {
+		info, err := os.Stat(newDir)
+		if err != nil || !info.IsDir() {
+			return e.i18n.Tf(MsgDirInvalidPath, newDir), ""
+		}
 	}
 
 	if !e.multiWorkspace {
@@ -8856,8 +9299,11 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	defer cancel()
 
 	// Execute command using the native shell so Windows config commands work too.
+	// If boq-bound, run inside the container instead.
 	var shellCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
+	if bb := e.lookupBoqBinding(e.boqChannelKey(msg)); bb != nil {
+		shellCmd = ContainerExecCommand(ctx, bb.Runtime, "boq-"+bb.BoqName, workDir, execCmd)
+	} else if runtime.GOOS == "windows" {
 		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", execCmd)
 		shellCmd.Dir = workDir
 	} else {
@@ -10401,7 +10847,11 @@ func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager
 		return e.agent, e.sessions
 	}
 	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
-		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace)); err == nil {
+		var boqName string
+		if bb := e.lookupBoqBinding(channelKey); bb != nil {
+			boqName = bb.BoqName
+		}
+		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(normalizeWorkspacePath(b.Workspace), boqName); err == nil {
 			return wsAgent, wsSessions
 		}
 	}
@@ -10455,6 +10905,9 @@ func (e *Engine) interactiveKeyWithChannelKey(sessionKey, channelKey string) str
 	}
 	if b, _, usable := e.lookupEffectiveWorkspaceBinding(channelKey); usable {
 		poolKey := normalizeWorkspacePath(b.Workspace)
+		if bb := e.lookupBoqBinding(channelKey); bb != nil {
+			poolKey = poolKey + "::boq:" + bb.BoqName
+		}
 		return poolKey + ":" + sessionKey
 	}
 	return sessionKey

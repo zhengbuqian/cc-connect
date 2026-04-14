@@ -245,6 +245,10 @@ func main() {
 		engine.SetBaseWorkDir(workDir)
 		engine.SetProjectStateStore(projectState)
 
+		// Wire boq (container isolation) bindings
+		boqStore := filepath.Join(cfg.DataDir, "boq_bindings.json")
+		engine.SetBoqBindings(core.NewBoqBindingManager(boqStore))
+
 		// Wire multi-workspace mode
 		if proj.Mode == "multi-workspace" {
 			baseDir := proj.BaseDir
